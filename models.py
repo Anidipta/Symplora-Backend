@@ -260,6 +260,7 @@ class LeaveRequest:
         
         try:
             with sqlite3.connect(self.db.db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 # Get leave request details
                 cursor = conn.execute('''
                     SELECT lr.*, e.name as employee_name, e.annual_leave_balance, e.sick_leave_balance
@@ -272,8 +273,13 @@ class LeaveRequest:
                 if not request:
                     return {"success": False, "error": "Leave request not found"}
                 
-                if request[7] != 'pending':  # status column
-                    return {"success": False, "error": f"Leave request is already {request[7]}"}
+                if request['status'] != 'pending':  # Use dictionary access
+                    return {"success": False, "error": f"Leave request is already {request['status']}"}
+                
+                # Convert dates to datetime objects for calculation
+                start_date = datetime.strptime(request['start_date'], '%Y-%m-%d')
+                end_date = datetime.strptime(request['end_date'], '%Y-%m-%d')
+                days_requested = request['days_requested']  # Use existing calculated days
                 
                 # Check if approver exists
                 approver = Employee(self.db).get_employee(approved_by)
@@ -282,46 +288,53 @@ class LeaveRequest:
                 
                 if action == 'approved':
                     # Deduct leave balance
-                    leave_type = request[2]
-                    days_requested = request[6]
+                    leave_type = request['leave_type']
                     
                     if leave_type == 'annual':
-                        new_balance = request[11] - days_requested  # annual_leave_balance
+                        current_balance = request['annual_leave_balance']
+                        new_balance = current_balance - days_requested
                         if new_balance < 0:
                             return {"success": False, "error": "Insufficient leave balance"}
                         
                         conn.execute('UPDATE employees SET annual_leave_balance = ? WHERE id = ?', 
-                                   (new_balance, request[1]))
+                                   (new_balance, request['employee_id']))
                         
                         # Record balance history
                         conn.execute('''
-                            INSERT INTO leave_balance_history (employee_id, leave_type, balance_before, balance_after, change_amount, change_reason)
+                            INSERT INTO leave_balance_history 
+                            (employee_id, leave_type, balance_before, balance_after, change_amount, change_reason)
                             VALUES (?, 'annual', ?, ?, ?, 'Leave approved')
-                        ''', (request[1], request[11], new_balance, -days_requested))
+                        ''', (request['employee_id'], current_balance, new_balance, -days_requested))
                     
                     elif leave_type == 'sick':
-                        new_balance = request[12] - days_requested  # sick_leave_balance
+                        current_balance = request['sick_leave_balance']
+                        new_balance = current_balance - days_requested
                         if new_balance < 0:
                             return {"success": False, "error": "Insufficient sick leave balance"}
                         
                         conn.execute('UPDATE employees SET sick_leave_balance = ? WHERE id = ?', 
-                                   (new_balance, request[1]))
+                                   (new_balance, request['employee_id']))
                         
                         # Record balance history
                         conn.execute('''
-                            INSERT INTO leave_balance_history (employee_id, leave_type, balance_before, balance_after, change_amount, change_reason)
+                            INSERT INTO leave_balance_history 
+                            (employee_id, leave_type, balance_before, balance_after, change_amount, change_reason)
                             VALUES (?, 'sick', ?, ?, ?, 'Leave approved')
-                        ''', (request[1], request[12], new_balance, -days_requested))
-                
-                # Update request status
-                conn.execute('''
-                    UPDATE leave_requests 
-                    SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP 
-                    WHERE id = ?
-                ''', (action, approved_by, request_id))
-                
-                return {"success": True, "message": f"Leave request {action} successfully"}
-        
+                        ''', (request['employee_id'], current_balance, new_balance, -days_requested))
+            
+            # Update request status
+            conn.execute('''
+                UPDATE leave_requests 
+                SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            ''', (action, approved_by, request_id))
+            
+            return {
+                "success": True, 
+                "message": f"Leave request {action} successfully",
+                "days_processed": days_requested
+            }
+    
         except Exception as e:
             return {"success": False, "error": f"Failed to {action} leave request: {str(e)}"}
     
